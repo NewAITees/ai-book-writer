@@ -36,7 +36,8 @@ poetry.lock
 *.swo
 .DS_Store
 .chainlit/
-
+.files/
+.venv/
 
 # Output files
 output/

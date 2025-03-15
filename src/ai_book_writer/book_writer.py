@@ -11,12 +11,18 @@ import os
 import sys
 import asyncio
 import logging
-from typing import Dict, List, Optional, Union
+import json
+from typing import Dict, List, Optional, Union, Any
+from datetime import datetime
 
 from rich.console import Console
+from rich.progress import Progress, TaskID
+from rich.logging import RichHandler
 
-# Import the webtools module for web scraping
-from ai_book_writer.webtools import fetch_webpage_content, search_and_extract_content
+# Import the project modules
+from ai_book_writer.webtools import search_and_extract_content, fetch_webpage_content
+from ai_book_writer.ollama_helpers import OllamaConfig, check_model_availability, generate_book_outline, generate_chapter_content
+from ai_book_writer.book_formatter import save_book_to_formats
 
 # Initialize console for rich output
 console = Console()
@@ -46,7 +52,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--model", "-m", 
         type=str, 
-        default=os.environ.get("BOOK_WRITER_MODEL", "ollama/gemma3:4b"),
+        default=os.environ.get("BOOK_WRITER_MODEL", "gemma3:4b"),
         help="LLM model to use (default: ollama/gemma3:4b)"
     )
     
@@ -62,13 +68,27 @@ def parse_arguments() -> argparse.Namespace:
         help="Verify facts"
     )
     
+    parser.add_argument(
+        "--results", "-r",
+        type=int,
+        default=int(os.environ.get("SEARCH_RESULTS_COUNT", "5")),
+        help="Number of search results to use (default: 5)"
+    )
+    
+    parser.add_argument(
+        "--temperature", 
+        type=float,
+        default=float(os.environ.get("MODEL_TEMPERATURE", "0.7")),
+        help="Temperature for text generation (default: 0.7)"
+    )
+    
     return parser.parse_args()
 
 def setup_environment() -> Dict[str, str]:
     """Set up environment variables and configuration."""
     config = {
-        "model": os.environ.get("BOOK_WRITER_MODEL", "ollama/gemma3:4b"),
-        "search_results_count": int(os.environ.get("SEARCH_RESULTS_COUNT", "10")),
+        "model": os.environ.get("BOOK_WRITER_MODEL", "gemma3:4b"),
+        "search_results_count": int(os.environ.get("SEARCH_RESULTS_COUNT", "5")),
         "temperature": float(os.environ.get("MODEL_TEMPERATURE", "0.7")),
     }
     
@@ -114,12 +134,89 @@ async def gather_research_data(topic: str, num_results: int = 5) -> str:
         logger.error(f"Error while gathering research data: {str(e)}")
         return f"# Research on {topic}\n\nError gathering information: {str(e)}"
 
+async def generate_book(topic: str, research_data: str, args: argparse.Namespace, progress: Progress, task_id: TaskID) -> Dict[str, Any]:
+    """
+    本を生成する
+    
+    Args:
+        topic: 本のトピック
+        research_data: 収集した研究データ
+        args: コマンドライン引数
+        progress: 進捗表示オブジェクト
+        task_id: タスクID
+        
+    Returns:
+        Dict[str, Any]: 生成された本のデータ
+    """
+    # Ollama設定
+    ollama_config = OllamaConfig(
+        model=args.model,
+        temperature=args.temperature
+    )
+    
+    # モデルの可用性をチェック
+    model_available = await check_model_availability(ollama_config.model)
+    
+    if not model_available:
+        logger.error(f"Model {ollama_config.model} is not available. Please download it with 'ollama pull {ollama_config.model}'")
+        raise RuntimeError(f"Model {ollama_config.model} is not available")
+    
+    try:
+        # 概要の生成
+        progress.update(task_id, description="Generating book outline...", completed=10)
+        book_outline = await generate_book_outline(research_data, topic, ollama_config)
+        
+        progress.update(task_id, description="Book outline generated", completed=20)
+        logger.info(f"Generated book outline: {book_outline['title']}")
+        
+        # 章の数
+        num_chapters = len(book_outline["chapters"])
+        chapter_progress_increment = 70 / num_chapters  # 残りの70%を章の数で分割
+        
+        # 各章の内容を生成
+        for i, chapter_info in enumerate(book_outline["chapters"]):
+            progress.update(
+                task_id, 
+                description=f"Writing chapter {i+1}/{num_chapters}: {chapter_info['title']}...",
+                completed=20 + i * chapter_progress_increment
+            )
+            
+            # 章の内容を生成
+            chapter_content = await generate_chapter_content(
+                chapter_info,
+                topic,
+                research_data,
+                book_outline,
+                ollama_config
+            )
+            
+            # 生成された内容を章に格納
+            book_outline["chapters"][i]["content"] = chapter_content["content"]
+            
+            progress.update(
+                task_id, 
+                description=f"Completed chapter {i+1}/{num_chapters}",
+                completed=20 + (i + 1) * chapter_progress_increment
+            )
+        
+        # 完了
+        progress.update(task_id, description="Book generation completed", completed=90)
+        
+        return book_outline
+    
+    except Exception as e:
+        logger.error(f"Error generating book: {str(e)}")
+        raise
+
 async def main_async():
     """Main async function to run the AI-Powered Book Writer."""
     try:
         # 引数の解析
         args = parse_arguments()
         config = setup_environment()
+        
+        # タイムスタンプ（ファイル名やログ用）
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # 出力メッセージ
         console.print(f"[bold green]AI-Powered Book Writer[/bold green]")
@@ -128,28 +225,54 @@ async def main_async():
         console.print(f"Model: [bold]{args.model}[/bold]")
         console.print(f"Generate image descriptions: [bold]{'Yes' if args.images else 'No'}[/bold]")
         console.print(f"Verify facts: [bold]{'Yes' if args.verify else 'No'}[/bold]")
+        console.print(f"Number of search results: [bold]{args.results}[/bold]")
+        console.print(f"Temperature: [bold]{args.temperature}[/bold]")
         console.print("\n")
         
-        # トピックに関する情報を収集
-        research_data = await gather_research_data(args.topic)
+        # 進捗表示の設定
+        with Progress() as progress:
+            # タスクの作成
+            overall_task = progress.add_task("[green]Writing book...", total=100)
+            
+            # トピックに関する情報を収集
+            progress.update(overall_task, description="Researching topic...", completed=0)
+            research_data = await gather_research_data(args.topic, args.results)
+            
+            # 収集した情報を保存（デバッグ用）
+            research_file = f"output/research_{args.topic.replace(' ', '_')}_{timestamp}.md"
+            with open(research_file, "w", encoding="utf-8") as f:
+                f.write(research_data)
+            
+            progress.update(overall_task, description="Research data collected", completed=10)
+            logger.info(f"Research data saved to {research_file}")
+            
+            # 本の生成
+            book_data = await generate_book(args.topic, research_data, args, progress, overall_task)
+            
+            # 生成した本のデータを保存（デバッグ用）
+            book_json_file = f"output/book_data_{args.topic.replace(' ', '_')}_{timestamp}.json"
+            with open(book_json_file, "w", encoding="utf-8") as f:
+                json.dump(book_data, f, ensure_ascii=False, indent=2)
+            
+            progress.update(overall_task, description="Converting to output format(s)...", completed=90)
+            
+            # 本を指定された形式で保存
+            formats = [args.format] if args.format != "all" else ["md", "html", "pdf"]
+            output_files = save_book_to_formats(book_data, args.topic, formats)
+            
+            # 完了表示
+            progress.update(overall_task, description="Book creation completed!", completed=100)
         
-        # 収集した情報を保存（デバッグ用）
-        research_file = f"output/research_{args.topic.replace(' ', '_')}.md"
-        with open(research_file, "w", encoding="utf-8") as f:
-            f.write(research_data)
-        
-        console.print(f"[bold green]Research data saved to {research_file}[/bold green]")
-        
-        # TODO: 本の生成処理を実装
-        # 1. 研究データを使用して本の概要を生成
-        # 2. 概要に基づいて各章を生成
-        # 3. 生成された章を編集・校正
-        # 4. 指定された形式で本を保存
-        
-        console.print("[bold green]Book creation completed![/bold green]")
+        # 出力ファイルの表示
+        console.print("\n[bold green]Book creation completed![/bold green]")
+        console.print("Output files:")
+        for fmt, path in output_files.items():
+            console.print(f"  - {fmt.upper()}: {path}")
+    
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
         console.print(f"[bold red]Error: {str(e)}[/bold red]")
+        sys.exit(1)
 
 def main():
     """Main function to run the AI-Powered Book Writer."""
@@ -159,7 +282,7 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler('book_writer.log'),
-            logging.StreamHandler()
+            RichHandler(rich_tracebacks=True)
         ]
     )
     

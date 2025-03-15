@@ -35,12 +35,15 @@ poetry.lock
 *.swp
 *.swo
 .DS_Store
+.chainlit/
+
 
 # Output files
+output/
 output/*.md
 output/*.html
 output/*.pdf
-
+test_output/
 # Logs
 *.log
 logs/ 

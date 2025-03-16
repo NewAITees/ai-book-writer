@@ -66,8 +66,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--model", "-m", 
         type=str, 
-        default=os.environ.get("BOOK_WRITER_MODEL", "gemma3:4b"),
-        help="LLM model to use (default: ollama/gemma3:4b)"
+        default=os.environ.get("BOOK_WRITER_MODEL", "gemma3:27b"),
+        help="LLM model to use (default: ollama/gemma3:27b)"
     )
     
     parser.add_argument(
@@ -109,7 +109,7 @@ def parse_arguments() -> argparse.Namespace:
 def setup_environment() -> Dict[str, str]:
     """Set up environment variables and configuration."""
     config = {
-        "model": os.environ.get("BOOK_WRITER_MODEL", "gemma3:4b"),
+        "model": os.environ.get("BOOK_WRITER_MODEL", "gemma3:27b"),
         "search_results_count": int(os.environ.get("SEARCH_RESULTS_COUNT", "5")),
         "temperature": float(os.environ.get("MODEL_TEMPERATURE", "0.7")),
     }

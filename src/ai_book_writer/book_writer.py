@@ -20,7 +20,10 @@ from rich.progress import Progress, TaskID
 from rich.logging import RichHandler
 
 # Import the project modules
-from ai_book_writer.webtools import search_and_extract_content, fetch_webpage_content
+from ai_book_writer.webtools import (
+    search_and_extract,
+    fetch_webpage_content_sync as fetch_webpage_content
+)
 from ai_book_writer.ollama_helpers import OllamaConfig, check_model_availability, generate_book_outline, generate_chapter_content
 from ai_book_writer.book_formatter import save_book_to_formats
 
@@ -112,7 +115,7 @@ async def gather_research_data(topic: str, num_results: int = 5) -> str:
     
     try:
         # 検索と内容抽出を実行
-        results = await search_and_extract_content(topic, num_results)
+        results = await search_and_extract(topic, num_results)
         
         if not results:
             logger.warning(f"No search results found for topic: {topic}")
@@ -124,7 +127,7 @@ async def gather_research_data(topic: str, num_results: int = 5) -> str:
         for i, result in enumerate(results):
             combined_content += f"## {result.title}\n\n"
             combined_content += f"Source: {result.url}\n\n"
-            combined_content += result.markdown + "\n\n"
+            combined_content += result.content + "\n\n"
             combined_content += "---\n\n"
         
         logger.info(f"Successfully gathered research data for topic: {topic}")

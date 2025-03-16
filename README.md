@@ -94,6 +94,9 @@ poetry run book-writer --topic "日本の伝統料理" --format all --images --r
 より大きなモデルを使って科学の本を作成：
 ```bash
 poetry run book-writer --topic "宇宙物理学の最新発見" --model "gemma3:27b" --verify
+
+poetry run book-writer --topic "ollama の様々な使い方" --model "gemma3:27b" --verify --results 15 --temperature 0.6
+
 ```
 
 ## 環境変数によるカスタマイズ

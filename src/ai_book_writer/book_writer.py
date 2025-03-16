@@ -14,6 +14,8 @@ import logging
 import json
 from typing import Dict, List, Optional, Union, Any
 from datetime import datetime
+from enum import Enum
+from pathlib import Path
 
 from rich.console import Console
 from rich.progress import Progress, TaskID
@@ -30,6 +32,15 @@ from ai_book_writer.book_formatter import save_book_to_formats
 # Initialize console for rich output
 console = Console()
 logger = logging.getLogger("book_writer")
+
+# Define book types
+class BookType(str, Enum):
+    """本のタイプを定義する列挙型"""
+    BLOG = "blog"
+    HORROR = "horror"
+    SCIFI = "scifi"
+    PROGRAMMING = "programming"
+    TECHNICAL = "technical"
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -57,6 +68,14 @@ def parse_arguments() -> argparse.Namespace:
         type=str, 
         default=os.environ.get("BOOK_WRITER_MODEL", "gemma3:4b"),
         help="LLM model to use (default: ollama/gemma3:4b)"
+    )
+    
+    parser.add_argument(
+        "--type", "-ty",
+        type=str,
+        choices=[t.value for t in BookType],
+        default=BookType.TECHNICAL.value,
+        help="Type of book to generate (default: technical)"
     )
     
     parser.add_argument(
@@ -100,25 +119,40 @@ def setup_environment() -> Dict[str, str]:
     
     return config
 
-async def gather_research_data(topic: str, num_results: int = 5) -> str:
+async def gather_research_data(topic: str, num_results: int = 5, book_type: str = BookType.TECHNICAL.value) -> str:
     """
     指定したトピックに関する情報を収集
     
     Args:
         topic: 検索トピック
         num_results: 結果の最大数
+        book_type: 本のタイプ
         
     Returns:
         str: 収集した情報（マークダウン形式）
     """
-    console.print(f"[bold blue]Researching topic: {topic}[/bold blue]")
+    # 本のタイプに基づいて検索キーワードを調整
+    search_modifiers = {
+        BookType.BLOG.value: "blog articles",
+        BookType.HORROR.value: "horror stories themes elements",
+        BookType.SCIFI.value: "science fiction concepts themes",
+        BookType.PROGRAMMING.value: "programming tutorial examples",
+        BookType.TECHNICAL.value: "technical analysis guide"
+    }
+    
+    # 検索クエリの調整
+    search_query = topic
+    if book_type in search_modifiers:
+        search_query = f"{topic} {search_modifiers[book_type]}"
+    
+    console.print(f"[bold blue]Researching topic: {search_query}[/bold blue]")
     
     try:
         # 検索と内容抽出を実行
-        results = await search_and_extract(topic, num_results)
+        results = await search_and_extract(search_query, num_results)
         
         if not results:
-            logger.warning(f"No search results found for topic: {topic}")
+            logger.warning(f"No search results found for topic: {search_query}")
             return f"# Research on {topic}\n\nNo detailed information found."
         
         # 結果をマークダウン形式で結合
@@ -137,7 +171,7 @@ async def gather_research_data(topic: str, num_results: int = 5) -> str:
         logger.error(f"Error while gathering research data: {str(e)}")
         return f"# Research on {topic}\n\nError gathering information: {str(e)}"
 
-async def generate_book(topic: str, research_data: str, args: argparse.Namespace, progress: Progress, task_id: TaskID) -> Dict[str, Any]:
+async def generate_book(topic: str, research_data: str, args: argparse.Namespace, progress: Progress, task_id: TaskID, prompt_templates: Dict[str, Dict[str, str]]) -> Dict[str, Any]:
     """
     本を生成する
     
@@ -147,6 +181,7 @@ async def generate_book(topic: str, research_data: str, args: argparse.Namespace
         args: コマンドライン引数
         progress: 進捗表示オブジェクト
         task_id: タスクID
+        prompt_templates: プロンプトテンプレート
         
     Returns:
         Dict[str, Any]: 生成された本のデータ
@@ -167,7 +202,11 @@ async def generate_book(topic: str, research_data: str, args: argparse.Namespace
     try:
         # 概要の生成
         progress.update(task_id, description="Generating book outline...", completed=10)
-        book_outline = await generate_book_outline(research_data, topic, ollama_config)
+        book_outline = await generate_book_outline(
+            research_data, 
+            topic, 
+            ollama_config
+        )
         
         progress.update(task_id, description="Book outline generated", completed=20)
         logger.info(f"Generated book outline: {book_outline['title']}")
@@ -211,6 +250,72 @@ async def generate_book(topic: str, research_data: str, args: argparse.Namespace
         logger.error(f"Error generating book: {str(e)}")
         raise
 
+def load_prompt_templates() -> Dict[str, Dict[str, str]]:
+    """
+    外部プロンプトファイルを読み込む
+    
+    Returns:
+        Dict[str, Dict[str, str]]: 本のタイプごとのプロンプトテンプレート
+    """
+    template_dir = Path(__file__).parent / "prompts"
+    
+    # ディレクトリが存在しない場合は作成
+    if not template_dir.exists():
+        template_dir.mkdir(parents=True, exist_ok=True)
+    
+    # すべての本のタイプに対応するテンプレートをロード
+    templates = {}
+    
+    for book_type in BookType:
+        type_templates = {}
+        type_dir = template_dir / book_type.value
+        
+        # タイプごとのディレクトリが存在しない場合は作成
+        if not type_dir.exists():
+            type_dir.mkdir(parents=True, exist_ok=True)
+        
+        # システムプロンプトのファイルパス
+        system_path = type_dir / "system_prompt.txt"
+        outline_path = type_dir / "outline_instructions.txt"
+        chapter_path = type_dir / "chapter_instructions.txt"
+        
+        # システムプロンプトの内容をロードまたは作成
+        if system_path.exists():
+            with open(system_path, "r", encoding="utf-8") as f:
+                type_templates["system_prompt"] = f.read()
+        else:
+            # デフォルトのシステムプロンプトを作成
+            default_system_prompt = f"あなたは{book_type.value}の専門家です。"
+            type_templates["system_prompt"] = default_system_prompt
+            with open(system_path, "w", encoding="utf-8") as f:
+                f.write(default_system_prompt)
+        
+        # 概要指示の内容をロードまたは作成
+        if outline_path.exists():
+            with open(outline_path, "r", encoding="utf-8") as f:
+                type_templates["outline_instructions"] = f.read()
+        else:
+            # デフォルトの概要指示を作成
+            default_outline = f"{book_type.value}として適切な本の構造を計画してください。"
+            type_templates["outline_instructions"] = default_outline
+            with open(outline_path, "w", encoding="utf-8") as f:
+                f.write(default_outline)
+        
+        # 章指示の内容をロードまたは作成
+        if chapter_path.exists():
+            with open(chapter_path, "r", encoding="utf-8") as f:
+                type_templates["chapter_instructions"] = f.read()
+        else:
+            # デフォルトの章指示を作成
+            default_chapter = f"{book_type.value}に適した章の構成で執筆してください。"
+            type_templates["chapter_instructions"] = default_chapter
+            with open(chapter_path, "w", encoding="utf-8") as f:
+                f.write(default_chapter)
+        
+        templates[book_type.value] = type_templates
+    
+    return templates
+
 async def main_async():
     """Main async function to run the AI-Powered Book Writer."""
     try:
@@ -218,12 +323,16 @@ async def main_async():
         args = parse_arguments()
         config = setup_environment()
         
+        # プロンプトテンプレートの読み込み
+        prompt_templates = load_prompt_templates()
+        
         # タイムスタンプ（ファイル名やログ用）
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # 出力メッセージ
         console.print(f"[bold green]AI-Powered Book Writer[/bold green]")
         console.print(f"Topic: [bold]{args.topic}[/bold]")
+        console.print(f"Book type: [bold]{args.type}[/bold]")
         console.print(f"Output format: [bold]{args.format}[/bold]")
         console.print(f"Model: [bold]{args.model}[/bold]")
         console.print(f"Generate image descriptions: [bold]{'Yes' if args.images else 'No'}[/bold]")
@@ -239,7 +348,7 @@ async def main_async():
             
             # トピックに関する情報を収集
             progress.update(overall_task, description="Researching topic...", completed=0)
-            research_data = await gather_research_data(args.topic, args.results)
+            research_data = await gather_research_data(args.topic, args.results, args.type)
             
             # 収集した情報を保存（デバッグ用）
             research_file = f"output/research_{args.topic.replace(' ', '_')}_{timestamp}.md"
@@ -250,7 +359,14 @@ async def main_async():
             logger.info(f"Research data saved to {research_file}")
             
             # 本の生成
-            book_data = await generate_book(args.topic, research_data, args, progress, overall_task)
+            book_data = await generate_book(
+                args.topic, 
+                research_data, 
+                args, 
+                progress, 
+                overall_task,
+                prompt_templates
+            )
             
             # 生成した本のデータを保存（デバッグ用）
             book_json_file = f"output/book_data_{args.topic.replace(' ', '_')}_{timestamp}.json"
